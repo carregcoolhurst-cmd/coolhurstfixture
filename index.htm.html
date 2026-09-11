@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Coolhurst — Upcoming Fixtures</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+  :root {
+    --green: #3C6549;
+    --cream: #F0EBDF;
+    --gold: #C8A951;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--green);
+    color: var(--cream);
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    overflow: hidden;
+  }
+  .frame {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+  }
+  .stripe {
+    height: 10px;
+    background: var(--gold);
+    flex-shrink: 0;
+  }
+  header {
+    text-align: center;
+    padding: 26px 20px 14px;
+    flex-shrink: 0;
+  }
+  header .eyebrow {
+    margin: 0;
+    font-size: 18px;
+    color: var(--gold);
+  }
+  header h1 {
+    margin: 4px 0 0;
+    font-size: 46px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .page-viewport {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    padding: 0 60px;
+  }
+  .team-page {
+    position: absolute;
+    top: 0;
+    left: 60px;
+    right: 60px;
+    opacity: 0;
+    transition: opacity 0.6s ease;
+    pointer-events: none;
+  }
+  .team-page.active {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .fixture-row {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 16px 4px;
+    border-bottom: 1px solid rgba(240, 235, 223, 0.15);
+  }
+  .fixture-row .opponent {
+    flex: 2;
+    font-size: 26px;
+    font-weight: 600;
+  }
+  .fixture-row .ha-badge {
+    flex: 0 0 auto;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 3px;
+    border: 1px solid var(--gold);
+    color: var(--gold);
+    letter-spacing: 0.5px;
+  }
+  .fixture-row .ha-badge.home {
+    background: var(--gold);
+    color: var(--green);
+  }
+  .fixture-row .date-block {
+    flex: 2;
+    font-size: 22px;
+  }
+  .fixture-row .date-block .rearranged-tag {
+    display: block;
+    font-size: 14px;
+    color: var(--gold);
+    margin-top: 2px;
+  }
+  .fixture-row .date-block.rearranged {
+    color: var(--gold);
+    font-weight: 600;
+  }
+  .fixture-row .time {
+    flex: 1;
+    font-size: 22px;
+    text-align: right;
+    opacity: 0.9;
+  }
+  .fixture-row .confirmed-dot {
+    flex: 0 0 auto;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(240, 235, 223, 0.25);
+  }
+  .fixture-row .confirmed-dot.yes {
+    background: var(--gold);
+  }
+  .dots {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    padding: 18px 0;
+    flex-shrink: 0;
+  }
+  .dots .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: rgba(240, 235, 223, 0.3);
+  }
+  .dots .dot.active {
+    background: var(--gold);
+  }
+  .empty-state, .error-state {
+    text-align: center;
+    padding: 60px 20px;
+    font-size: 20px;
+    color: var(--cream);
+    opacity: 0.8;
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="stripe"></div>
+  <header>
+    <p class="eyebrow" id="subtitle">Loading…</p>
+    <h1 id="team-name">Fixtures</h1>
+  </header>
+  <div class="page-viewport" id="viewport">
+    <div class="empty-state" id="loading-state">Loading fixtures…</div>
+  </div>
+  <div class="dots" id="dots"></div>
+  <div class="stripe"></div>
+</div>
+
+<script>
+  // ---- CONFIGURATION ----
+  // Replace with your published Google Sheet CSV export URL.
+  // Take your "pubhtml" link, change "pubhtml" to "pub", and add "&output=csv".
+  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTHxDgtI1bU9P2-8wqDG9HjBRVc8q_lOD4dpafpxF2f-1D3VdsCoUQ7DaAYi3WCdC4gsszLTDi3Qb29/pub?gid=0&single=true&output=csv";
+
+  const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // re-fetch data every 5 minutes
+  const SECONDS_PER_TEAM = 8;                 // how long each team's page stays on screen
+
+  let teamPages = [];   // [{ team, fixtures: [...] }]
+  let currentIndex = 0;
+  let rotationTimer = null;
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str || "";
+    return div.innerHTML;
+  }
+
+  function findCol(headers, pattern) {
+    return headers.findIndex(h => pattern.test(h));
+  }
+
+  function parseSheet(rows) {
+    // Find the real header row (the one starting with "TEAM"), since there's
+    // a title row and a blank row above it in this sheet.
+    const headerRowIndex = rows.findIndex(r => (r[0] || "").trim().toUpperCase() === "TEAM");
+    if (headerRowIndex === -1) return [];
+
+    const headers = rows[headerRowIndex].map(h => (h || "").trim().toUpperCase());
+    const col = {
+      team: findCol(headers, /^TEAM$/),
+      opponent: findCol(headers, /OPPONENT/),
+      homeAway: findCol(headers, /HOME/),
+      scheduledDate: findCol(headers, /SCHEDULED DATE/),
+      newDate: findCol(headers, /NEW DATE/),
+      time: findCol(headers, /^TIME$/),
+      confirmed: findCol(headers, /CONFIRMED/)
+    };
+
+    const groups = [];
+    let currentTeam = null;
+    let currentGroup = null;
+
+    for (let i = headerRowIndex + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const teamCell = (row[col.team] || "").trim();
+      const opponentCell = (row[col.opponent] || "").trim();
+
+      if (teamCell) {
+        currentTeam = teamCell;
+      }
+      if (!currentTeam || !opponentCell) continue; // skip separators / placeholder rows
+
+      if (!currentGroup || currentGroup.team !== currentTeam) {
+        currentGroup = { team: currentTeam, fixtures: [] };
+        groups.push(currentGroup);
+      }
+
+      const scheduledDate = (row[col.scheduledDate] || "").trim();
+      const newDate = (row[col.newDate] || "").trim();
+      const isRearranged = newDate && scheduledDate && newDate.toLowerCase() !== scheduledDate.toLowerCase();
+      const displayDate = newDate || scheduledDate || "Date TBC";
+
+      currentGroup.fixtures.push({
+        opponent: opponentCell,
+        homeAway: (row[col.homeAway] || "").trim(),
+        displayDate,
+        originalDate: scheduledDate,
+        isRearranged,
+        time: (row[col.time] || "").trim(),
+        confirmedYes: /^YES$/i.test((row[col.confirmed] || "").trim())
+      });
+    }
+
+    return groups;
+  }
+
+  function renderPages() {
+    const viewport = document.getElementById("viewport");
+    const dotsEl = document.getElementById("dots");
+    viewport.innerHTML = "";
+    dotsEl.innerHTML = "";
+
+    if (teamPages.length === 0) {
+      viewport.innerHTML = '<div class="empty-state">No fixtures found.</div>';
+      document.getElementById("team-name").textContent = "Fixtures";
+      document.getElementById("subtitle").textContent = "";
+      return;
+    }
+
+    teamPages.forEach((page, i) => {
+      const pageEl = document.createElement("div");
+      pageEl.className = "team-page";
+      pageEl.dataset.index = i;
+
+      page.fixtures.forEach(fx => {
+        const row = document.createElement("div");
+        row.className = "fixture-row";
+        row.innerHTML = `
+          <div class="opponent">${escapeHtml(fx.opponent)}</div>
+          <div class="ha-badge ${fx.homeAway.toLowerCase() === "home" ? "home" : ""}">${escapeHtml(fx.homeAway || "\u2014")}</div>
+          <div class="date-block ${fx.isRearranged ? "rearranged" : ""}">
+            ${escapeHtml(fx.displayDate)}
+            ${fx.isRearranged ? `<span class="rearranged-tag">rearranged \u2014 was ${escapeHtml(fx.originalDate)}</span>` : ""}
+          </div>
+          <div class="time">${escapeHtml(fx.time)}</div>
+          <div class="confirmed-dot ${fx.confirmedYes ? "yes" : ""}" title="${fx.confirmedYes ? "Confirmed" : "Not yet confirmed"}"></div>
+        `;
+        pageEl.appendChild(row);
+      });
+
+      viewport.appendChild(pageEl);
+
+      const dot = document.createElement("div");
+      dot.className = "dot";
+      dotsEl.appendChild(dot);
+    });
+
+    currentIndex = Math.min(currentIndex, teamPages.length - 1);
+    showPage(currentIndex);
+    restartRotation();
+  }
+
+  function showPage(index) {
+    document.querySelectorAll(".team-page").forEach((el, i) => {
+      el.classList.toggle("active", i === index);
+    });
+    document.querySelectorAll(".dot").forEach((el, i) => {
+      el.classList.toggle("active", i === index);
+    });
+    const page = teamPages[index];
+    document.getElementById("team-name").textContent = page.team;
+    document.getElementById("subtitle").textContent =
+      page.fixtures.length + (page.fixtures.length === 1 ? " fixture" : " fixtures");
+    currentIndex = index;
+  }
+
+  function restartRotation() {
+    if (rotationTimer) clearInterval(rotationTimer);
+    if (teamPages.length <= 1) return;
+    rotationTimer = setInterval(() => {
+      showPage((currentIndex + 1) % teamPages.length);
+    }, SECONDS_PER_TEAM * 1000);
+  }
+
+  function loadData() {
+    Papa.parse(CSV_URL, {
+      download: true,
+      complete: function(results) {
+        teamPages = parseSheet(results.data);
+        renderPages();
+      },
+      error: function() {
+        document.getElementById("viewport").innerHTML =
+          '<div class="error-state">Couldn\'t load fixtures right now.</div>';
+        document.getElementById("subtitle").textContent = "";
+      }
+    });
+  }
+
+  loadData();
+  setInterval(loadData, REFRESH_INTERVAL_MS);
+</script>
+</body>
+</html>
